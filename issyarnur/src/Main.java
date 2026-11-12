@@ -53,6 +53,8 @@ public class Main {
                 sendFile(exchange, "app.js", "text/javascript; charset=utf-8");
             } else if (method.equals("GET") && path.equals("/api/listings")) {
                 getListings(exchange);
+            } else if (method.equals("GET") && path.equals("/api/content")) {
+                sendContent(exchange, false);
             } else if (method.equals("GET") && path.equals("/api/me")) {
                 User user = currentUser(exchange);
                 sendJson(exchange, 200, "{\"user\":" + (user == null ? "null" : userJson(user)) + "}");
@@ -75,6 +77,13 @@ public class Main {
                 createListing(exchange);
             } else if (method.equals("POST") && path.matches("/api/admin/listings/[^/]+/toggle")) {
                 toggleListing(exchange, path.split("/")[4]);
+            } else if (method.equals("GET") && path.equals("/api/admin/content")) {
+                requireAdmin(exchange);
+                sendContent(exchange, true);
+            } else if (method.equals("POST") && path.equals("/api/admin/content")) {
+                createContent(exchange);
+            } else if (method.equals("POST") && path.matches("/api/admin/content/[^/]+/toggle")) {
+                toggleContent(exchange, path.split("/")[4]);
             } else {
                 sendJson(exchange, 404, error("Страница не найдена"));
             }
@@ -240,6 +249,58 @@ public class Main {
         sendJson(exchange, 200, "{\"ok\":true}");
     }
 
+    private static void sendContent(HttpExchange exchange, boolean includeInactive) throws IOException {
+        List<Content> content;
+        synchronized (DATA_LOCK) {
+            content = STORE.content.stream().filter(item -> includeInactive || item.active).toList();
+        }
+        StringBuilder json = new StringBuilder("{\"content\":[");
+        for (int i = 0; i < content.size(); i++) {
+            if (i > 0) json.append(',');
+            json.append(contentJson(content.get(i)));
+        }
+        sendJson(exchange, 200, json.append("]}").toString());
+    }
+
+    private static void createContent(HttpExchange exchange) throws IOException {
+        requireAdmin(exchange);
+        Map<String, String> form = readForm(exchange);
+        String type = required(form, "type").trim().toUpperCase();
+        String title = required(form, "title").trim();
+        String body = required(form, "body").trim();
+        String mediaUrl = form.getOrDefault("mediaUrl", "").trim();
+        String linkUrl = form.getOrDefault("linkUrl", "").trim();
+        if (!List.of("ARTICLE", "PHOTO", "VIDEO", "AD").contains(type)) throw new ApiException(400, "Выберите тип публикации");
+        if (title.length() > 100 || body.length() > 2_000) throw new ApiException(400, "Заголовок или текст публикации слишком длинный");
+        if (!mediaUrl.isEmpty() && !isHttpUrl(mediaUrl)) throw new ApiException(400, "Ссылка на фото или видео должна начинаться с http:// или https://");
+        if (!linkUrl.isEmpty() && !isHttpUrl(linkUrl)) throw new ApiException(400, "Ссылка перехода должна начинаться с http:// или https://");
+        if ((type.equals("PHOTO") || type.equals("VIDEO") || type.equals("AD")) && mediaUrl.isEmpty()) {
+            throw new ApiException(400, "Для фото, видео и рекламы добавьте ссылку на медиафайл");
+        }
+        if (type.equals("AD") && linkUrl.isEmpty()) throw new ApiException(400, "Для рекламной публикации добавьте ссылку перехода");
+        Content item = new Content(UUID.randomUUID().toString(), type, title, body, mediaUrl, linkUrl, true);
+        synchronized (DATA_LOCK) {
+            STORE.content.add(item);
+            saveStore();
+        }
+        sendJson(exchange, 201, "{\"content\":" + contentJson(item) + "}");
+    }
+
+    private static boolean isHttpUrl(String value) {
+        return value.length() <= 1_000 && value.matches("https?://.{1,990}");
+    }
+
+    private static void toggleContent(HttpExchange exchange, String contentId) throws IOException {
+        requireAdmin(exchange);
+        synchronized (DATA_LOCK) {
+            Content item = STORE.content.stream().filter(content -> content.id.equals(contentId)).findFirst().orElse(null);
+            if (item == null) throw new ApiException(404, "Публикация не найдена");
+            item.active = !item.active;
+            saveStore();
+        }
+        sendJson(exchange, 200, "{\"ok\":true}");
+    }
+
     private static User requireUser(HttpExchange exchange) {
         User user = currentUser(exchange);
         if (user == null) throw new ApiException(401, "Войдите в аккаунт, чтобы продолжить");
@@ -350,6 +411,12 @@ public class Main {
                 + ",\"listing\":" + (listing == null ? "null" : listingJson(listing)) + ",\"guest\":" + (guest == null ? "null" : userJson(guest)) + "}";
     }
 
+    private static String contentJson(Content content) {
+        return "{\"id\":" + json(content.id) + ",\"type\":" + json(content.type) + ",\"title\":" + json(content.title)
+                + ",\"body\":" + json(content.body) + ",\"mediaUrl\":" + json(content.mediaUrl)
+                + ",\"linkUrl\":" + json(content.linkUrl) + ",\"active\":" + content.active + "}";
+    }
+
     private static String json(String value) {
         StringBuilder result = new StringBuilder("\"");
         for (char character : value.toCharArray()) {
@@ -426,6 +493,10 @@ public class Main {
                             store.bookings.add(new Booking(field.get(0), field.get(1), field.get(2), field.get(3), field.get(4),
                                     Integer.parseInt(field.get(5)), Long.parseLong(field.get(6)), field.get(7)));
                         }
+                        case "content" -> {
+                            List<String> field = decodeFields(parts);
+                            store.content.add(new Content(field.get(0), field.get(1), field.get(2), field.get(3), field.get(4), field.get(5), Boolean.parseBoolean(field.get(6))));
+                        }
                         default -> throw new IOException("Неизвестная запись в " + DATA_FILE);
                     }
                 }
@@ -473,6 +544,11 @@ public class Main {
             properties.setProperty("booking." + index++, encodeFields(booking.id, booking.userId, booking.listingId, booking.checkIn,
                     booking.checkOut, Integer.toString(booking.guests), Long.toString(booking.total), booking.status));
         }
+        index = 0;
+        for (Content content : STORE.content) {
+            properties.setProperty("content." + index++, encodeFields(content.id, content.type, content.title, content.body,
+                    content.mediaUrl, content.linkUrl, Boolean.toString(content.active)));
+        }
         try {
             Files.createDirectories(DATA_FILE.getParent());
             Path temporary = DATA_FILE.resolveSibling(DATA_FILE.getFileName() + ".tmp");
@@ -513,6 +589,7 @@ public class Main {
         final Map<String, User> users = new HashMap<>();
         final List<Listing> listings = new ArrayList<>();
         final List<Booking> bookings = new ArrayList<>();
+        final List<Content> content = new ArrayList<>();
     }
 
     private static class User {
@@ -541,6 +618,15 @@ public class Main {
         Booking(String id, String userId, String listingId, String checkIn, String checkOut, int guests, long total, String status) {
             this.id = id; this.userId = userId; this.listingId = listingId; this.checkIn = checkIn; this.checkOut = checkOut;
             this.guests = guests; this.total = total; this.status = status;
+        }
+    }
+
+    private static class Content {
+        final String id, type, title, body, mediaUrl, linkUrl;
+        boolean active;
+        Content(String id, String type, String title, String body, String mediaUrl, String linkUrl, boolean active) {
+            this.id = id; this.type = type; this.title = title; this.body = body;
+            this.mediaUrl = mediaUrl; this.linkUrl = linkUrl; this.active = active;
         }
     }
 

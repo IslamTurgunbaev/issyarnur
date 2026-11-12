@@ -3,11 +3,14 @@ const emptyState = document.querySelector('#emptyState');
 const dashboard = document.querySelector('#dashboard');
 const adminDashboard = document.querySelector('#adminDashboard');
 const accountArea = document.querySelector('#accountArea');
+const promotion = document.querySelector('#promotion');
+const journal = document.querySelector('#journal');
 const backdrop = document.querySelector('#modalBackdrop');
 const modalContent = document.querySelector('#modalContent');
 const toastElement = document.querySelector('#toast');
 let currentUser = null;
 let allListings = [];
+let allContent = [];
 let toastTimer;
 
 async function api(path, options = {}) {
@@ -72,7 +75,7 @@ function renderAccount() {
     adminDashboard.hidden = true;
     return;
   }
-  accountArea.innerHTML = `<button class="button button-quiet" data-scroll="dashboard">${escapeHtml(currentUser.name.split(' ')[0])} ↘</button><button class="button button-dark" data-logout>Выйти</button>`;
+  accountArea.innerHTML = `<button class="button button-quiet" data-scroll="${currentUser.role === 'ADMIN' ? 'adminDashboard' : 'dashboard'}">${escapeHtml(currentUser.name.split(' ')[0])} ↘</button><button class="button button-dark" data-logout>Выйти</button>`;
   dashboard.hidden = currentUser.role === 'ADMIN';
   adminDashboard.hidden = currentUser.role !== 'ADMIN';
 }
@@ -95,6 +98,30 @@ function renderListings(listings = allListings) {
   listingGrid.querySelectorAll('img').forEach(image => image.addEventListener('error', () => { image.src = 'https://images.unsplash.com/photo-1600210492486-724fe5c67fb0?auto=format&fit=crop&w=900&q=75'; }, { once: true }));
 }
 
+function renderContent() {
+  const ads = allContent.filter(item => item.type === 'AD');
+  promotion.hidden = ads.length === 0;
+  promotion.innerHTML = ads.map(item => `
+    <article class="promotion-card">
+      <img src="${escapeHtml(item.mediaUrl)}" alt="${escapeHtml(item.title)}" loading="lazy">
+      <div class="promotion-copy"><span class="ad-label">Реклама</span><h2>${escapeHtml(item.title)}</h2><p>${escapeHtml(item.body)}</p><a class="button button-accent button-small" href="${escapeHtml(item.linkUrl)}" target="_blank" rel="noopener noreferrer">Подробнее ↗</a></div>
+    </article>
+  `).join('');
+
+  const entries = allContent.filter(item => item.type !== 'AD');
+  journal.hidden = entries.length === 0;
+  journal.innerHTML = entries.length ? `<div class="section-heading"><div><div class="eyebrow">ЖУРНАЛ FASTRENT</div><h2>Истории и вдохновение</h2></div></div><div class="content-grid">${entries.map(item => {
+    const media = item.type === 'PHOTO'
+      ? `<img class="content-media" src="${escapeHtml(item.mediaUrl)}" alt="${escapeHtml(item.title)}" loading="lazy">`
+      : item.type === 'VIDEO'
+        ? `<video class="content-media" src="${escapeHtml(item.mediaUrl)}" controls preload="metadata" aria-label="${escapeHtml(item.title)}"></video>`
+        : '';
+    const typeLabel = { ARTICLE: 'Статья', PHOTO: 'Фотоистория', VIDEO: 'Видео' }[item.type] || 'Публикация';
+    return `<article class="content-card">${media}<div class="content-copy"><span class="content-type">${typeLabel}</span><h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.body).replace(/\n/g, '<br>')}</p></div></article>`;
+  }).join('')}</div>` : '';
+  [promotion, journal].forEach(section => section.querySelectorAll('img').forEach(image => image.addEventListener('error', () => { image.hidden = true; }, { once: true })));
+}
+
 function renderBookings(bookings, isAdmin = false) {
   if (!bookings.length) return '<div class="empty-state">Пока бронирований нет. Самое время выбрать место для поездки.</div>';
   return `<div class="booking-list">${bookings.map(booking => {
@@ -109,7 +136,7 @@ function renderBookings(bookings, isAdmin = false) {
 async function loadDashboard() {
   if (!currentUser) return;
   if (currentUser.role === 'ADMIN') {
-    const [bookingResult, listingResult] = await Promise.all([api('/api/bookings'), api('/api/admin/listings')]);
+    const [bookingResult, listingResult, contentResult] = await Promise.all([api('/api/bookings'), api('/api/admin/listings'), api('/api/admin/content')]);
     const activeCount = listingResult.listings.filter(item => item.active).length;
     const revenue = bookingResult.bookings.filter(item => item.status !== 'CANCELLED').reduce((total, item) => total + item.total, 0);
     adminDashboard.innerHTML = `
@@ -125,6 +152,18 @@ async function loadDashboard() {
         </form>
         <div class="admin-inventory"><h3>Каталог квартир</h3>${listingResult.listings.map(item => `<div class="admin-listing"><div><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.city)} · ${item.active ? 'Опубликована' : 'Скрыта'}</small></div><button class="button button-quiet button-small" data-toggle="${escapeHtml(item.id)}">${item.active ? 'Скрыть' : 'Опубликовать'}</button></div>`).join('')}</div>
       </div>
+      <div class="dashboard-head content-admin-heading"><div><div class="eyebrow">СТАТЬИ, ФОТО, ВИДЕО И РЕКЛАМА</div><h2>Публикации сайта</h2></div></div>
+      <div class="admin-grid">
+        <form id="contentForm" class="admin-form"><h3>Создать публикацию</h3>
+          <div class="form-field"><label>Тип</label><select name="type"><option value="ARTICLE">Статья</option><option value="PHOTO">Фотоистория</option><option value="VIDEO">Видео</option><option value="AD">Рекламный пост</option></select></div>
+          <div class="form-field"><label>Заголовок</label><input name="title" required maxlength="100" placeholder="Название публикации"></div>
+          <div class="form-field"><label>Текст</label><textarea name="body" required maxlength="2000" placeholder="Текст статьи или описание"></textarea></div>
+          <div class="form-field"><label>Ссылка на фото или видео</label><input name="mediaUrl" type="url" maxlength="1000" placeholder="https://… (обязательно для фото, видео и рекламы)"></div>
+          <div class="form-field"><label>Ссылка для рекламного поста</label><input name="linkUrl" type="url" maxlength="1000" placeholder="https://… (только для рекламы)"></div>
+          <button class="button button-dark" type="submit">Опубликовать</button>
+        </form>
+        <div class="admin-inventory"><h3>Управление публикациями</h3>${contentResult.content.length ? contentResult.content.map(item => `<div class="admin-listing"><div><strong>${escapeHtml(item.title)}</strong><small>${{ ARTICLE: 'Статья', PHOTO: 'Фото', VIDEO: 'Видео', AD: 'Реклама' }[item.type] || 'Публикация'} · ${item.active ? 'Опубликована' : 'Скрыта'}</small></div><button class="button button-quiet button-small" data-content-toggle="${escapeHtml(item.id)}">${item.active ? 'Скрыть' : 'Опубликовать'}</button></div>`).join('') : '<p class="muted">Публикаций пока нет.</p>'}</div>
+      </div>
       <div class="dashboard-head" style="margin:34px 0 18px"><div><div class="eyebrow">ВСЕ ГОСТИ И ЗАКАЗЫ</div><h2>Бронирования</h2></div></div>${renderBookings(bookingResult.bookings, true)}
     `;
   } else {
@@ -135,11 +174,13 @@ async function loadDashboard() {
 
 async function reload() {
   try {
-    const [me, listings] = await Promise.all([api('/api/me'), api('/api/listings')]);
+    const [me, listings, content] = await Promise.all([api('/api/me'), api('/api/listings'), api('/api/content')]);
     currentUser = me.user;
     allListings = listings.listings;
+    allContent = content.content;
     renderAccount();
     renderListings();
+    renderContent();
     await loadDashboard();
   } catch (error) {
     notify(error.message);
@@ -194,6 +235,11 @@ document.addEventListener('click', async event => {
     try { await api(`/api/admin/listings/${encodeURIComponent(toggleButton.dataset.toggle)}/toggle`, { method: 'POST', body: '' }); notify('Каталог обновлён'); await reload(); }
     catch (error) { notify(error.message); }
   }
+  const contentToggleButton = event.target.closest('[data-content-toggle]');
+  if (contentToggleButton) {
+    try { await api(`/api/admin/content/${encodeURIComponent(contentToggleButton.dataset.contentToggle)}/toggle`, { method: 'POST', body: '' }); notify('Публикация обновлена'); await reload(); }
+    catch (error) { notify(error.message); }
+  }
   const scrollButton = event.target.closest('[data-scroll]');
   if (scrollButton) document.querySelector(`#${scrollButton.dataset.scroll}`).scrollIntoView({ behavior: 'smooth' });
   if (event.target.closest('#modalClose') || event.target === backdrop) closeModal();
@@ -224,12 +270,17 @@ document.addEventListener('submit', async event => {
   }
   if (form.id === 'bookingForm') {
     event.preventDefault();
-    try { await api('/api/bookings', { method: 'POST', body: new URLSearchParams(new FormData(form)) }); closeModal(); await reload(); notify('Квартира забронирована — хорошей поездки!'); document.querySelector('#dashboard').scrollIntoView({ behavior: 'smooth' }); }
+    try { await api('/api/bookings', { method: 'POST', body: new URLSearchParams(new FormData(form)) }); closeModal(); await reload(); notify('Квартира забронирована — хорошей поездки!'); document.querySelector(`#${currentUser.role === 'ADMIN' ? 'adminDashboard' : 'dashboard'}`).scrollIntoView({ behavior: 'smooth' }); }
     catch (error) { notify(error.message); }
   }
   if (form.id === 'listingForm') {
     event.preventDefault();
     try { await api('/api/admin/listings', { method: 'POST', body: new URLSearchParams(new FormData(form)) }); form.reset(); await reload(); notify('Квартира добавлена в каталог'); }
+    catch (error) { notify(error.message); }
+  }
+  if (form.id === 'contentForm') {
+    event.preventDefault();
+    try { await api('/api/admin/content', { method: 'POST', body: new URLSearchParams(new FormData(form)) }); form.reset(); await reload(); notify('Публикация добавлена на сайт'); }
     catch (error) { notify(error.message); }
   }
 });
